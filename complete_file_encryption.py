@@ -400,6 +400,20 @@ def main():
     st.title("🔐 File Encryption Tool")
     st.markdown("**Secure file encryption using enterprise-grade algorithms**")
     
+    # Team credits section
+    with st.expander("👥 About the Development Team", expanded=False):
+        st.markdown("### 🛠️ Built by Team **EncryptEase**")
+        st.markdown("**Total Members:** 4")
+        st.markdown("""
+        **Team Members:**
+        - 🧑‍💻 **Jay Kumar**
+        - 👩‍💻 **Akaisha Sundhan** 
+        - 🧑‍💻 **Badal Pal**
+        - 👨‍💻 **Dhaval Thakker**
+        """)
+        st.markdown("---")
+        st.markdown("💡 *This tool was developed with dedication to providing secure and user-friendly file encryption.*")
+    
     # Sidebar for configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
