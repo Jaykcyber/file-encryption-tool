@@ -1,0 +1,23 @@
+This is a test file for the Complete File Encryption Tool.
+
+🔐 UNIFIED ENCRYPTION TOOL TEST 🔐
+
+This single file contains both:
+- Enterprise-grade encryption logic
+- User-friendly web interface
+
+Test Instructions:
+1. Run: streamlit run complete_file_encryption.py
+2. Upload this test file
+3. Enter password: "TestPassword123!"
+4. Download encrypted file
+5. Test decryption with same password
+
+Features:
+✅ Fernet encryption (AES 128 CBC + HMAC SHA256)
+✅ PBKDF2 key derivation (configurable iterations)
+✅ File integrity verification
+✅ User-friendly web interface
+✅ All-in-one solution
+
+Ready to secure your files! 🛡️
