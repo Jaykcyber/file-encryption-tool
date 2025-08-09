@@ -1,6 +1,10 @@
 # file-encryption-tool
 # File Encryption Tool - Project Documentation
 
+## 🌐 **Live Demo**
+**🚀 Try the File Encryption Tool Online:**  
+**[Open Working Project](https://file-encryption-tool-4lyfxcfduvt3fcihxyeic5.streamlit.app/)**
+
 ## 🛠️ Developed by Team **EncryptEase**
 
 **Total Members:** 4
