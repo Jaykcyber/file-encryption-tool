@@ -407,9 +407,9 @@ def main():
         st.markdown("""
         **Team Members:**
         - 🧑‍💻 **Jay Kumar**
-        - 👩‍💻 **Akaisha Sundhan** 
+        - 👩‍💻 **Gaurav Singh Solanki** 
         - 🧑‍💻 **Badal Pal**
-        - 👨‍💻 **Dhaval Thakker**
+        - 👨‍💻 **Kaustubh Sharma**
         """)
         st.markdown("---")
         st.markdown("💡 *This tool was developed with dedication to providing secure and user-friendly file encryption.*")
