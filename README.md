@@ -9,9 +9,9 @@
 
 **Total Members:** 4
 - 🧑‍💻 **Jay Kumar**
-- 👩‍💻 **Akaisha Sundhan** 
+- 👩‍💻 **Gaurav Singh Solanki** 
 - 🧑‍💻 **Badal Pal**
-- 👨‍💻 **Dhaval Thakker**
+- 👨‍💻 **Kaustubh Sharma**
 
 ---
 
