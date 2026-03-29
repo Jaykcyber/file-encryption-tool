@@ -42,6 +42,7 @@ The **File Encryption Tool** is an enterprise-grade, web-based application that 
 - **Configurable Security Parameters**: Adjustable PBKDF2 iterations and other security settings
 - **Memory Efficient**: Processes large files in chunks to optimize memory usage
 - **Comprehensive Error Handling**: Custom exception hierarchy for different error scenarios
+ - **Optional OTP MFA**: Optional One-Time Password multi-factor authentication (email or SMS) that can be enabled at encryption time. OTPs are cryptographically generated, time-limited, single-use, and never stored in raw form.
 
 ---
 
@@ -67,6 +68,9 @@ File Encryption Tool
 3. **Metadata Handling** (`EncryptionMetadata`)
 4. **Web Interface** (Streamlit components)
 5. **Exception System** (Custom error hierarchy)
+6. **OTP Service (optional)**
+   - `OTPProvider` abstraction for pluggable delivery implementations (email, SMS).
+   - Example providers: `SMTPEmailProvider`, `TwilioSMSProvider`.
 
 ---
 
@@ -78,6 +82,12 @@ File Encryption Tool
 - **Salt Generation**: Cryptographically secure random salt (32 bytes)
 - **Iterations**: Configurable PBKDF2 iterations (default: 100,000)
 - **Integrity Check**: SHA-256 hash verification
+
+### One-Time Password (OTP) Multi-Factor Authentication (optional)
+- **OTP Generation**: Cryptographically secure numeric OTPs (default 6 digits) generated with Python's `secrets` module.
+- **Delivery**: Pluggable providers for Email (SMTP) and SMS (Twilio-like); delivery configuration is provided via environment variables.
+- **Storage**: Raw OTPs are NEVER stored. Only an HMAC-SHA256 digest and its random salt (hex) are stored in the file metadata along with an expiry timestamp.
+- **Validity**: OTPs are time-limited (default 5 minutes) and single-use. Brute-force protections (attempt counters and temporary blocking) are implemented; production deployments should back this with Redis.
 
 ### Security Measures:
 - **Password Validation**: Ensures non-empty passwords
@@ -155,6 +165,7 @@ max_file_size: int = 100 * 1024 * 1024  # Maximum file size
    - Generate encryption metadata
    - Calculate original file hash (if integrity check enabled)
    - Store configuration parameters
+   - If OTP MFA is enabled: generate a cryptographically secure OTP, hash it (HMAC-SHA256 with a random salt), store only the hashed value + salt + expiry and send the raw OTP to the configured contact via the selected provider.
 
 4. **File Structure Creation**
    ```
@@ -172,6 +183,10 @@ max_file_size: int = 100 * 1024 * 1024  # Maximum file size
    - Read metadata length and extract metadata
    - Parse encryption parameters
    - Extract salt for key derivation
+
+   **OTP Validation (if enabled)**
+   - When metadata indicates OTP MFA is enabled, require the user to provide the OTP prior to key derivation.
+   - Validate the provided OTP by computing the same HMAC-SHA256 using the stored salt and comparing in constant time; enforce expiry and brute-force protections.
 
 2. **Key Derivation**
    - Use stored salt and user password
@@ -325,6 +340,24 @@ class EncryptionConfig:
 - Minimum salt length: 16 bytes
 - Minimum chunk size: 1,024 bytes
 
+### OTP Configuration / Environment Variables
+The Streamlit UI uses environment variables to configure delivery providers. For production, supply secure credentials in your environment or secret store:
+
+- SMTP (email) provider:
+   - `SMTP_SERVER` (e.g., smtp.example.com)
+   - `SMTP_PORT` (default: 587)
+   - `SMTP_USER` (username / from address)
+   - `SMTP_PASS` (password)
+   - `SMTP_FROM` (optional override for From header)
+
+- Twilio-like (SMS) provider:
+   - `TWILIO_SID`
+   - `TWILIO_TOKEN`
+   - `TWILIO_FROM` (registered sending number)
+
+Notes:
+- If OTP is enabled at encryption time, the UI requires a configured provider and will fail-fast if providers are not configured. This prevents displaying raw OTPs in the UI or logs.
+
 ---
 
 ## 📄 File Format
@@ -399,6 +432,11 @@ streamlit run complete_file_encryption.py
 - **Secure Cleanup**: Temporary files securely deleted
 - **Memory Protection**: Sensitive data cleared when possible
 - **Error Information**: Prevents information leakage through errors
+ - **OTP Safety**: Raw OTPs are never persisted; OTPs are hashed using HMAC-SHA256 with a per-OTP random salt stored in metadata; expiry and brute-force protections are enforced.
+
+### OTP Limitations & Production Notes
+- The current implementation includes a simple in-memory attempt tracker and single-use marker suitable for single-process deployments or demos. For robust, distributed, production-grade behavior you must back the attempt store and single-use flags with a centralized store such as Redis (recommended) to prevent bypass across multiple app instances or after process restarts.
+- Use managed transactional email (SendGrid/SES) and the official Twilio SDK in production for reliability, logging, retries and observability. Store provider credentials in a secure secret manager (not in code or plaintext files).
 
 ### User Recommendations:
 - **Strong Passwords**: Use long, complex passwords
