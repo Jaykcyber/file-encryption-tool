@@ -11,10 +11,15 @@ import hashlib
 import secrets
 import tempfile
 from pathlib import Path
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
+import smtplib
+import ssl
+import hmac
+import urllib.request
+import urllib.parse
 import base64
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -88,7 +93,13 @@ class EncryptionMetadata:
     file_hash: Optional[str] = None
     iterations: int = 100_000
     salt_length: int = 32
-    
+    # OTP-related fields (optional)
+    otp_enabled: bool = False
+    otp_hash: Optional[str] = None  # SHA-256 hex digest of OTP HMAC
+    otp_salt: Optional[str] = None  # hex-encoded salt used as HMAC key
+    otp_expiry: Optional[str] = None  # ISO8601 timestamp
+    otp_contact: Optional[str] = None  # email or phone number
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert metadata to dictionary."""
         return {
@@ -97,13 +108,206 @@ class EncryptionMetadata:
             'timestamp': self.timestamp,
             'file_hash': self.file_hash,
             'iterations': self.iterations,
-            'salt_length': self.salt_length
+            'salt_length': self.salt_length,
+            'otp_enabled': self.otp_enabled,
+            'otp_hash': self.otp_hash,
+            'otp_salt': self.otp_salt,
+            'otp_expiry': self.otp_expiry,
+            'otp_contact': self.otp_contact
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'EncryptionMetadata':
-        """Create metadata from dictionary."""
-        return cls(**data)
+        """Create metadata from dictionary with safe defaults for backward compatibility."""
+        return cls(
+            version=data.get('version', '1.0'),
+            algorithm=data.get('algorithm', 'Fernet'),
+            timestamp=data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+            file_hash=data.get('file_hash'),
+            iterations=data.get('iterations', 100_000),
+            salt_length=data.get('salt_length', 32),
+            otp_enabled=data.get('otp_enabled', False),
+            otp_hash=data.get('otp_hash'),
+            otp_salt=data.get('otp_salt'),
+            otp_expiry=data.get('otp_expiry'),
+            otp_contact=data.get('otp_contact')
+        )
+
+
+# ===== OTP SERVICE / UTILITIES =====
+
+
+def _now_utc_iso() -> str:
+    """Return current UTC time as ISO8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def generate_numeric_otp(length: int = 6) -> str:
+    """Generate a cryptographically secure numeric OTP.
+
+    Constructed digit-by-digit using secrets.randbelow to avoid modulo bias.
+    """
+    if length <= 0:
+        raise ValueError("OTP length must be positive")
+    return ''.join(str(secrets.randbelow(10)) for _ in range(length))
+
+
+def hash_otp(otp: str, salt: Optional[bytes] = None) -> Tuple[str, str]:
+    """Hash OTP using HMAC-SHA256 with a random salt (used as HMAC key).
+
+    Returns (hex_digest, hex_salt).
+    """
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    digest = hmac.new(salt, otp.encode('utf-8'), hashlib.sha256).digest()
+    return digest.hex(), salt.hex()
+
+
+class OTPProvider:
+    """Abstract OTP sending interface."""
+
+    def send(self, contact: str, message: str) -> None:
+        raise NotImplementedError()
+
+
+class SMTPEmailProvider(OTPProvider):
+    """SMTP-based email provider.
+
+    In real deployments prefer a transactional email provider SDK (SendGrid, SES, etc.)
+    configured with proper credentials and TLS.
+    """
+
+    def __init__(self, smtp_server: str, smtp_port: int = 587, username: Optional[str] = None,
+                 password: Optional[str] = None, use_tls: bool = True, from_addr: Optional[str] = None):
+        self.smtp_server = smtp_server
+        self.smtp_port = smtp_port
+        self.username = username
+        self.password = password
+        self.use_tls = use_tls
+        self.from_addr = from_addr or username
+
+    def send(self, contact: str, message: str) -> None:
+        if not self.from_addr:
+            raise FileEncryptionError("SMTP from address not configured")
+
+        subject = "Your OTP code"
+        email_text = f"Subject: {subject}\nTo: {contact}\nFrom: {self.from_addr}\n\n{message}"
+
+        context = ssl.create_default_context()
+        try:
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10) as server:
+                if self.use_tls:
+                    server.starttls(context=context)
+                if self.username and self.password:
+                    server.login(self.username, self.password)
+                server.sendmail(self.from_addr, [contact], email_text)
+        except Exception:
+            # Avoid leaking SMTP errors to the user for security
+            raise FileEncryptionError("Failed to send OTP email")
+
+
+class TwilioSMSProvider(OTPProvider):
+    """Minimal Twilio-like SMS sender using HTTP API.
+
+    This is a light abstraction; in production use official SDK and secure storage
+    for credentials.
+    """
+
+    def __init__(self, account_sid: str, auth_token: str, from_number: str):
+        self.account_sid = account_sid
+        self.auth_token = auth_token
+        self.from_number = from_number
+
+    def send(self, contact: str, message: str) -> None:
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{urllib.parse.quote(self.account_sid)}/Messages.json"
+        data = urllib.parse.urlencode({
+            'From': self.from_number,
+            'To': contact,
+            'Body': message
+        }).encode('utf-8')
+
+        creds = f"{self.account_sid}:{self.auth_token}"
+        auth = base64.b64encode(creds.encode('utf-8')).decode('ascii')
+
+        req = urllib.request.Request(url, data=data, method='POST')
+        req.add_header('Authorization', f'Basic {auth}')
+        req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.getcode()
+                if status >= 400:
+                    raise FileEncryptionError('Failed to send SMS')
+        except Exception:
+            raise FileEncryptionError('Failed to send SMS')
+
+
+# Simple in-memory attempt tracker for brute-force protection (single-process)
+# For production use Redis or other centralized store for distributed rate limiting.
+_OTP_ATTEMPT_STORE: Dict[str, Dict[str, Any]] = {}
+
+
+def _metadata_signature(metadata_json: bytes, salt_bytes: bytes) -> str:
+    """Create an identifier for metadata+salt used as a key for attempt tracking.
+
+    This does not expose secrets; it's used only for local rate-limiting.
+    """
+    h = hashlib.sha256()
+    h.update(metadata_json)
+    h.update(salt_bytes)
+    return h.hexdigest()
+
+
+def validate_otp_provided(provided_otp: str, metadata: EncryptionMetadata, salt_bytes: bytes,
+                           max_attempts: int = 5) -> None:
+    """Validate a provided OTP against metadata (raises on failure).
+
+    This enforces expiry, single-use (caller should clear stored otp_hash after
+    successful validation), and basic rate limiting.
+    """
+    if not metadata.otp_enabled:
+        return
+
+    if not metadata.otp_hash or not metadata.otp_salt or not metadata.otp_expiry:
+        raise FileEncryptionError("OTP metadata is incomplete")
+
+    # Build rate-limit key
+    key = _metadata_signature(json.dumps(metadata.to_dict(), sort_keys=True).encode('utf-8'), salt_bytes)
+    rec = _OTP_ATTEMPT_STORE.get(key, {'attempts': 0, 'blocked_until': None})
+
+    # Check if already used
+    if rec.get('used'):
+        raise InvalidPasswordError("OTP has already been used")
+
+    # Check block
+    if rec.get('blocked_until'):
+        blocked_until = datetime.fromisoformat(rec['blocked_until'])
+        if datetime.now(timezone.utc) < blocked_until:
+            raise InvalidPasswordError("Too many OTP attempts; try later")
+        else:
+            rec = {'attempts': 0, 'blocked_until': None}
+
+    # Check expiry
+    expiry_dt = datetime.fromisoformat(metadata.otp_expiry)
+    if datetime.now(timezone.utc) > expiry_dt:
+        raise InvalidPasswordError("OTP has expired")
+
+    otp_salt_bytes = bytes.fromhex(metadata.otp_salt)
+    expected = hmac.new(otp_salt_bytes, provided_otp.encode('utf-8'), hashlib.sha256).digest().hex()
+
+    if not hmac.compare_digest(expected, metadata.otp_hash):
+        rec['attempts'] = rec.get('attempts', 0) + 1
+        if rec['attempts'] >= max_attempts:
+            rec['blocked_until'] = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+            _OTP_ATTEMPT_STORE[key] = rec
+            raise InvalidPasswordError("Too many incorrect OTP attempts; temporarily blocked")
+        _OTP_ATTEMPT_STORE[key] = rec
+        raise InvalidPasswordError("Invalid OTP")
+
+    # Success: mark as used to enforce single-use in this process (use Redis for production)
+    rec['used'] = True
+    _OTP_ATTEMPT_STORE[key] = rec
+
 
 
 class FileEncryptionTool:
@@ -179,8 +383,12 @@ class FileEncryptionTool:
         elif operation == 'write' and not os.access(file_path.parent, os.W_OK):
             raise InsufficientPermissionsError(f"No write permission for: {file_path.parent}")
     
-    def encrypt_file(self, file_path: Union[str, Path], password: str, 
-                    output_path: Optional[Union[str, Path]] = None) -> Path:
+    def encrypt_file(self, file_path: Union[str, Path], password: str,
+                    output_path: Optional[Union[str, Path]] = None,
+                    otp_contact: Optional[str] = None,
+                    otp_provider: Optional[OTPProvider] = None,
+                    otp_length: int = 6,
+                    otp_ttl_seconds: int = 300) -> Path:
         """Encrypt a file using Fernet symmetric encryption."""
         file_path = Path(file_path)
         output_path = Path(output_path) if output_path else file_path.with_suffix(file_path.suffix + '.encrypted')
@@ -207,6 +415,25 @@ class FileEncryptionTool:
                 iterations=self.config.pbkdf2_iterations,
                 salt_length=self.config.salt_length
             )
+
+            # If OTP is requested, generate, hash, and send it via provider
+            if otp_contact:
+                if not otp_provider:
+                    raise FileEncryptionError("OTP provider is required when otp_contact is supplied")
+
+                # Generate OTP and hash it (never store raw OTP)
+                otp = generate_numeric_otp(otp_length)
+                otp_hash_hex, otp_salt_hex = hash_otp(otp)
+                expiry_dt = datetime.now(timezone.utc) + timedelta(seconds=otp_ttl_seconds)
+                metadata.otp_enabled = True
+                metadata.otp_hash = otp_hash_hex
+                metadata.otp_salt = otp_salt_hex
+                metadata.otp_expiry = expiry_dt.isoformat()
+                metadata.otp_contact = otp_contact
+
+                # Send OTP via provider; errors should abort encryption without leaking secrets
+                send_msg = f"Your OTP for decrypting the file is: {otp}. It expires in {otp_ttl_seconds//60} minutes."
+                otp_provider.send(otp_contact, send_msg)
             
             # Encrypt file in chunks
             with file_path.open('rb') as infile, output_path.open('wb') as outfile:
@@ -245,7 +472,8 @@ class FileEncryptionTool:
                 raise FileEncryptionError(f"Encryption failed: {e}")
     
     def decrypt_file(self, encrypted_path: Union[str, Path], password: str,
-                    output_path: Optional[Union[str, Path]] = None) -> Path:
+                    output_path: Optional[Union[str, Path]] = None,
+                    provided_otp: Optional[str] = None) -> Path:
         """Decrypt a file encrypted with this tool."""
         encrypted_path = Path(encrypted_path)
         
@@ -284,7 +512,14 @@ class FileEncryptionTool:
                 salt = infile.read(metadata.salt_length)
                 if len(salt) != metadata.salt_length:
                     raise CorruptedFileError("Invalid salt length")
-                
+
+                # If OTP is enabled in metadata, validate provided OTP BEFORE decryption
+                if metadata.otp_enabled:
+                    if not provided_otp:
+                        raise InvalidPasswordError("OTP required for decryption but not provided")
+                    # Validate OTP (may raise InvalidPasswordError)
+                    validate_otp_provided(provided_otp, metadata, salt)
+
                 # Derive key
                 key = self._derive_key(password, salt)
                 fernet = Fernet(key)
@@ -493,6 +728,15 @@ def encrypt_file_interface():
             type="password"
         )
         
+        # OTP options
+        enable_otp = st.checkbox("Enable OTP (optional)", value=False,
+                                 help="Send a one-time password to an email or phone number for MFA during decryption.")
+        otp_contact = None
+        otp_method = None
+        if enable_otp:
+            otp_contact = st.text_input("OTP Contact (email or phone)", help="Enter an email address or phone number to receive the OTP")
+            otp_method = st.selectbox("OTP Method", ["email", "sms"], help="Choose how the OTP will be delivered")
+
         if st.button("🔒 Encrypt File", type="primary"):
             if not password:
                 st.error("❌ Please enter a password!")
@@ -513,9 +757,34 @@ def encrypt_file_interface():
                 
                 with st.spinner("🔄 Encrypting file..."):
                     # Encrypt the file
+                    # Prepare OTP provider if requested
+                    provider_obj = None
+                    if enable_otp and otp_contact:
+                        # Prefer environment-configured providers; use SMTP for email and Twilio for SMS
+                        if otp_method == 'email':
+                            smtp_server = os.environ.get('SMTP_SERVER')
+                            smtp_port = int(os.environ.get('SMTP_PORT', '587'))
+                            smtp_user = os.environ.get('SMTP_USER')
+                            smtp_pass = os.environ.get('SMTP_PASS')
+                            smtp_from = os.environ.get('SMTP_FROM', smtp_user)
+                            if not smtp_server or not smtp_user or not smtp_pass:
+                                st.error('SMTP configuration missing in environment (SMTP_SERVER/SMTP_USER/SMTP_PASS)')
+                                return
+                            provider_obj = SMTPEmailProvider(smtp_server, smtp_port, smtp_user, smtp_pass, True, smtp_from)
+                        else:
+                            tw_sid = os.environ.get('TWILIO_SID')
+                            tw_token = os.environ.get('TWILIO_TOKEN')
+                            tw_from = os.environ.get('TWILIO_FROM')
+                            if not tw_sid or not tw_token or not tw_from:
+                                st.error('Twilio configuration missing in environment (TWILIO_SID/TWILIO_TOKEN/TWILIO_FROM)')
+                                return
+                            provider_obj = TwilioSMSProvider(tw_sid, tw_token, tw_from)
+
                     encrypted_path = st.session_state['encryption_tool'].encrypt_file(
                         temp_input_path,
-                        password
+                        password,
+                        otp_contact=otp_contact if enable_otp else None,
+                        otp_provider=provider_obj
                     )
                     
                     # Read encrypted file
@@ -564,12 +833,33 @@ def decrypt_file_interface():
         file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
         st.info(f"📁 Encrypted File: {uploaded_file.name} ({file_size_mb:.2f} MB)")
         
+        # Determine whether OTP is required by inspecting file metadata (lightweight)
+        otp_required = False
+        try:
+            raw = uploaded_file.getvalue()
+            if len(raw) >= 4:
+                metadata_length = int.from_bytes(raw[0:4], 'big')
+                if len(raw) >= 4 + metadata_length:
+                    metadata_json = raw[4:4+metadata_length]
+                    metadata_dict = json.loads(metadata_json.decode('utf-8'))
+                    otp_required = bool(metadata_dict.get('otp_enabled', False))
+        except Exception:
+            otp_required = False
+
         # Password input
         password = st.text_input(
             "Enter decryption password",
             type="password",
             help="Enter the same password used to encrypt this file"
         )
+
+        provided_otp = None
+        if otp_required:
+            provided_otp = st.text_input(
+                "Enter OTP",
+                type="password",
+                help="Enter the one-time password sent to your email or phone"
+            )
         
         if st.button("🔓 Decrypt File", type="primary"):
             if not password:
@@ -583,10 +873,11 @@ def decrypt_file_interface():
                     temp_encrypted_path = Path(temp_encrypted.name)
                 
                 with st.spinner("🔄 Decrypting file..."):
-                    # Decrypt the file
+                    # Decrypt the file (pass OTP if required)
                     decrypted_path = st.session_state['encryption_tool'].decrypt_file(
                         temp_encrypted_path,
-                        password
+                        password,
+                        provided_otp=provided_otp
                     )
                     
                     # Read decrypted file
