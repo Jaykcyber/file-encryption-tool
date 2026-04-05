@@ -157,10 +157,10 @@ def hash_otp(otp: str, salt: Optional[bytes] = None) -> Tuple[str, str]:
 
     Returns (hex_digest, hex_salt).
     """
-    if salt is None:
-        salt = secrets.token_bytes(16)
-    digest = hmac.new(salt, otp.encode('utf-8'), hashlib.sha256).digest()
-    return digest.hex(), salt.hex()
+    # Simplified for demo: do not perform HMAC hashing. Return the plain OTP
+    # and an empty salt marker. This keeps the metadata structure unchanged
+    # while making OTP handling easy to understand for demos.
+    return otp, ''
 
 
 class OTPProvider:
@@ -195,15 +195,26 @@ class SMTPEmailProvider(OTPProvider):
 
         context = ssl.create_default_context()
         try:
-            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10) as server:
-                if self.use_tls:
-                    server.starttls(context=context)
-                if self.username and self.password:
-                    server.login(self.username, self.password)
-                server.sendmail(self.from_addr, [contact], email_text)
+            # Support both STARTTLS (commonly port 587) and implicit SSL (port 465)
+            if self.use_tls and self.smtp_port == 465:
+                # Implicit SSL
+                with smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, context=context, timeout=10) as server:
+                    if self.username and self.password:
+                        server.login(self.username, self.password)
+                    server.sendmail(self.from_addr, [contact], email_text)
+            else:
+                # STARTTLS flow (default port 587)
+                with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10) as server:
+                    server.ehlo()
+                    if self.use_tls:
+                        server.starttls(context=context)
+                        server.ehlo()
+                    if self.username and self.password:
+                        server.login(self.username, self.password)
+                    server.sendmail(self.from_addr, [contact], email_text)
         except Exception:
-            # Avoid leaking SMTP errors to the user for security
-            raise FileEncryptionError("Failed to send OTP email")
+            # Surface a friendly error for demo troubleshooting
+            raise FileEncryptionError("Failed to send OTP email; check SMTP credentials and network connectivity")
 
 
 class TwilioSMSProvider(OTPProvider):
@@ -244,69 +255,30 @@ class TwilioSMSProvider(OTPProvider):
 
 # Simple in-memory attempt tracker for brute-force protection (single-process)
 # For production use Redis or other centralized store for distributed rate limiting.
-_OTP_ATTEMPT_STORE: Dict[str, Dict[str, Any]] = {}
-
-
-def _metadata_signature(metadata_json: bytes, salt_bytes: bytes) -> str:
-    """Create an identifier for metadata+salt used as a key for attempt tracking.
-
-    This does not expose secrets; it's used only for local rate-limiting.
-    """
-    h = hashlib.sha256()
-    h.update(metadata_json)
-    h.update(salt_bytes)
-    return h.hexdigest()
-
-
 def validate_otp_provided(provided_otp: str, metadata: EncryptionMetadata, salt_bytes: bytes,
                            max_attempts: int = 5) -> None:
-    """Validate a provided OTP against metadata (raises on failure).
+    """Simplified OTP validation for demo purposes.
 
-    This enforces expiry, single-use (caller should clear stored otp_hash after
-    successful validation), and basic rate limiting.
+    - Expects the plain OTP to be stored in metadata.otp_hash.
+    - Checks expiry and uses a constant-time comparison.
+    - No attempt-tracking is performed (keep this in mind: demo only).
     """
     if not metadata.otp_enabled:
         return
 
-    if not metadata.otp_hash or not metadata.otp_salt or not metadata.otp_expiry:
+    if not metadata.otp_hash or not metadata.otp_expiry:
         raise FileEncryptionError("OTP metadata is incomplete")
-
-    # Build rate-limit key
-    key = _metadata_signature(json.dumps(metadata.to_dict(), sort_keys=True).encode('utf-8'), salt_bytes)
-    rec = _OTP_ATTEMPT_STORE.get(key, {'attempts': 0, 'blocked_until': None})
-
-    # Check if already used
-    if rec.get('used'):
-        raise InvalidPasswordError("OTP has already been used")
-
-    # Check block
-    if rec.get('blocked_until'):
-        blocked_until = datetime.fromisoformat(rec['blocked_until'])
-        if datetime.now(timezone.utc) < blocked_until:
-            raise InvalidPasswordError("Too many OTP attempts; try later")
-        else:
-            rec = {'attempts': 0, 'blocked_until': None}
 
     # Check expiry
     expiry_dt = datetime.fromisoformat(metadata.otp_expiry)
     if datetime.now(timezone.utc) > expiry_dt:
         raise InvalidPasswordError("OTP has expired")
 
-    otp_salt_bytes = bytes.fromhex(metadata.otp_salt)
-    expected = hmac.new(otp_salt_bytes, provided_otp.encode('utf-8'), hashlib.sha256).digest().hex()
+    expected = metadata.otp_hash  # plain OTP stored for demo
 
-    if not hmac.compare_digest(expected, metadata.otp_hash):
-        rec['attempts'] = rec.get('attempts', 0) + 1
-        if rec['attempts'] >= max_attempts:
-            rec['blocked_until'] = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
-            _OTP_ATTEMPT_STORE[key] = rec
-            raise InvalidPasswordError("Too many incorrect OTP attempts; temporarily blocked")
-        _OTP_ATTEMPT_STORE[key] = rec
+    # Use secrets.compare_digest for a timing-attack resistant comparison
+    if not secrets.compare_digest(provided_otp, expected):
         raise InvalidPasswordError("Invalid OTP")
-
-    # Success: mark as used to enforce single-use in this process (use Redis for production)
-    rec['used'] = True
-    _OTP_ATTEMPT_STORE[key] = rec
 
 
 
@@ -683,17 +655,20 @@ def main():
             st.session_state['encryption_tool'] = FileEncryptionTool(config=new_config)
             st.success("Configuration updated!")
     
-    # Main interface tabs
-    tab1, tab2, tab3 = st.tabs(["🔒 Encrypt File", "🔓 Decrypt File", "ℹ️ File Info"])
-    
+    # Main interface tabs (added Cybersecurity Awareness tab)
+    tab1, tab2, tab3, tab4 = st.tabs(["🔒 Encrypt File", "🔓 Decrypt File", "ℹ️ File Info", "🛡️ Cybersecurity Awareness"])
+
     with tab1:
         encrypt_file_interface()
-    
+
     with tab2:
         decrypt_file_interface()
-    
+
     with tab3:
         file_info_interface()
+
+    with tab4:
+        cyber_awareness_interface()
 
 
 def encrypt_file_interface():
@@ -734,7 +709,8 @@ def encrypt_file_interface():
         otp_contact = None
         otp_method = None
         if enable_otp:
-            otp_contact = st.text_input("OTP Contact (email or phone)", help="Enter an email address or phone number to receive the OTP")
+            # Prefill demo email for convenience; user can change it if desired
+            otp_contact = st.text_input("OTP Contact (email or phone)", value=" ", help="Enter an email address or phone number to receive the OTP")
             otp_method = st.selectbox("OTP Method", ["email", "sms"], help="Choose how the OTP will be delivered")
 
         if st.button("🔒 Encrypt File", type="primary"):
@@ -750,26 +726,28 @@ def encrypt_file_interface():
                 st.warning("⚠️ Password is quite short. Consider using a longer password for better security.")
             
             try:
-                # Create temporary files
+                    # Create temporary files
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{uploaded_file.name}") as temp_input:
                     temp_input.write(uploaded_file.getvalue())
                     temp_input_path = Path(temp_input.name)
                 
                 with st.spinner("🔄 Encrypting file..."):
                     # Encrypt the file
-                    # Prepare OTP provider if requested
+                    # Prepare OTP provider if requested. Try environment first; if missing,
+                    # allow entering SMTP details in the app (session-only storage) for demo usage.
                     provider_obj = None
                     if enable_otp and otp_contact:
-                        # Prefer environment-configured providers; use SMTP for email and Twilio for SMS
                         if otp_method == 'email':
-                            smtp_server = os.environ.get('SMTP_SERVER')
-                            smtp_port = int(os.environ.get('SMTP_PORT', '587'))
-                            smtp_user = os.environ.get('SMTP_USER')
-                            smtp_pass = os.environ.get('SMTP_PASS')
-                            smtp_from = os.environ.get('SMTP_FROM', smtp_user)
-                            if not smtp_server or not smtp_user or not smtp_pass:
-                                st.error('SMTP configuration missing in environment (SMTP_SERVER/SMTP_USER/SMTP_PASS)')
-                                return
+                            # DEMO: Use hardcoded SMTP credentials for the demo Gmail account.
+                            # WARNING: Hardcoding credentials is insecure. Do NOT commit these
+                            # values to a public repository. This is provided only to support
+                            # an offline demo to your teacher as requested.
+                            smtp_server = "smtp.gmail.com"
+                            smtp_port = 465
+                            smtp_user = "02.trial.email@gmail.com"
+                            smtp_pass = "qdxq ckcu glfk cydv"
+                            smtp_from = "02.trial.email@gmail.com"
+
                             provider_obj = SMTPEmailProvider(smtp_server, smtp_port, smtp_user, smtp_pass, True, smtp_from)
                         else:
                             tw_sid = os.environ.get('TWILIO_SID')
@@ -968,6 +946,72 @@ def file_info_interface():
             
         except Exception as e:
             st.error(f"❌ Error analyzing file: {e}")
+
+
+def cyber_awareness_interface():
+    """Simple Cybersecurity Awareness tab for demos.
+
+    Includes basic tips, common threats, helpline numbers, and a place to add a video.
+    """
+    st.header("🛡️ Cybersecurity Awareness")
+    st.write("Learn basic safe practices and where to get help.")
+
+    # Layout: two columns for tips and threats
+    tips_col, threats_col = st.columns([2, 2])
+
+    with tips_col:
+        st.subheader("Basic Cyber Hygiene")
+        st.markdown(
+            """
+- Use strong, unique passwords and a password manager.
+- Enable two-factor authentication (2FA) wherever possible.
+- Keep your OS and applications up to date.
+- Avoid clicking links from unknown senders; verify email senders.
+- Backup important files regularly and verify backups.
+            """
+        )
+
+    with threats_col:
+        st.subheader("Common Cyber Threats")
+        st.markdown(
+            """
+- Phishing — fraudulent messages that trick you into revealing data.
+- Malware — software designed to harm or steal data.
+- Ransomware — encrypts your files and demands payment.
+- Identity theft — attackers using personal data to impersonate you.
+            """
+        )
+
+    st.markdown("---")
+
+    # Helpline information
+    st.subheader("Useful Cyber Helplines (India)")
+    st.markdown(
+        """
+- **Cyber Crime Helpline:** 1930
+- **Police (Emergency):** 100
+- **Women Helpline:** 1091
+- **Cyber Crime Website:** https://cybercrime.gov.in
+        """
+    )
+
+    st.markdown("---")
+
+    # Video section: allow demo user to paste a URL or upload a small file
+    st.subheader("Awareness Video")
+    st.write("Add a short awareness video here. Provide a public video URL or upload a small file.")
+
+    # Placeholder box reserved for admin to add a video later.
+    # For demo purposes we always show an empty dashed box as a visual placeholder.
+    st.markdown(
+        '<div style="border:1px dashed #999; padding:16px; height:240px; display:flex; align-items:center; justify-content:center; color:#666;">'
+        + 'Video placeholder — admin will add video here.'
+        + '</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown("---")
+    st.info("This section is for educational/demo purposes. Follow your institution's guidance for production-ready security practices.")
 
 
 if __name__ == "__main__":
